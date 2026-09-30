@@ -57,7 +57,7 @@ android {
         }
     }
 
-    // dist：包名/应用名；abiPack：按架构拆包（保留 3 个变体）
+    // dist：包名/应用名；abiPack：按架构拆包。
     flavorDimensions += listOf("dist", "abiPack")
     productFlavors {
         create("original") {
@@ -67,6 +67,12 @@ android {
             dimension = "dist"
             applicationId = "com.chinablue.tv"
             resValue("string", "app_name", "Z视介")
+        }
+        create("xiaomiPad") {
+            dimension = "dist"
+            applicationId = "com.vesaa.mytv.xiaomipad"
+            versionNameSuffix = "-xiaomi-pad"
+            resValue("string", "app_name", "VsTV 平板适配")
         }
         create("arm") {
             dimension = "abiPack"
@@ -142,8 +148,11 @@ android {
 androidComponents {
     beforeVariants { variant ->
         val names = variant.productFlavors.associate { it.first to it.second }
-        // 仅保留 3 个发布包：originalArm / originalX86 / disguisedArm（去掉 disguisedX86）
+        // 保留原版发布变体；平板适配版仅构建 ARM，以便与原版并存验证。
         if (names["dist"] == "disguised" && names["abiPack"] == "x86") {
+            variant.enable = false
+        }
+        if (names["dist"] == "xiaomiPad" && names["abiPack"] == "x86") {
             variant.enable = false
         }
     }
@@ -176,7 +185,8 @@ dependencies {
     implementation(libs.androidx.tv.material)
 
     // 播放器（HLS / DASH / SmoothStreaming / RTSP / RTMP）。
-    // 默认集成 Jellyfin Media3 FFmpeg 扩展：硬解优先，硬解失败时软解兜底。
+    // Maven Central 的 Jellyfin FFmpeg 音频扩展与 Media3 1.8.0 对齐。
+    // AVC 视频软解使用系统 MediaCodec 软件解码器。
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.exoplayer.hls)
     implementation(libs.androidx.media3.exoplayer.dash)
@@ -220,5 +230,4 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 }
-
 

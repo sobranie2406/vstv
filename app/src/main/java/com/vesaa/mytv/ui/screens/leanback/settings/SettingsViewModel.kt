@@ -393,6 +393,14 @@ class LeanbackSettingsViewModel : ViewModel() {
             SP.updateForceRemind = value
         }
 
+    private var _videoPlayerDecodeMode by mutableStateOf(SP.videoPlayerDecodeMode)
+    var videoPlayerDecodeMode: SP.VideoPlayerDecodeMode
+        get() = _videoPlayerDecodeMode
+        set(value) {
+            _videoPlayerDecodeMode = value
+            SP.videoPlayerDecodeMode = value
+        }
+
     private var _videoPlayerLoadTimeout by mutableLongStateOf(SP.videoPlayerLoadTimeout)
     var videoPlayerLoadTimeout: Long
         get() = _videoPlayerLoadTimeout

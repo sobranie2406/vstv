@@ -22,10 +22,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Prepare builtin endpoints bundle
-        env:
-          PROPRIETARY_AGE_PASSPHRASE: ${{ secrets.PROPRIETARY_AGE_PASSPHRASE }}
-        run: bash scripts/ci-restore-proprietary.sh
+      # Build using the committed public defaults, without an encrypted endpoint bundle.
 
       - name: Setup JDK
         uses: actions/setup-java@v5

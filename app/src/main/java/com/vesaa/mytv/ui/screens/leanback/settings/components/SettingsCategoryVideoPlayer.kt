@@ -29,6 +29,28 @@ fun LeanbackSettingsCategoryVideoPlayer(
     ) {
         item {
             LeanbackSettingsCategoryListItem(
+                headlineContent = "视频解码方式",
+                supportingContent = when (settingsViewModel.videoPlayerDecodeMode) {
+                    SP.VideoPlayerDecodeMode.AUTO -> "硬解优先；解码失败后尝试其他兼容解码器及软解。下次换台生效"
+                    SP.VideoPlayerDecodeMode.HARDWARE_ONLY -> "只使用硬解，适合硬解兼容的直播源。下次换台生效"
+                    SP.VideoPlayerDecodeMode.SOFTWARE_ONLY -> "可解决部分隔行视频硬解失败；耗电较高，部分高分辨率视频可能不流畅。下次换台生效"
+                },
+                trailingContent = when (settingsViewModel.videoPlayerDecodeMode) {
+                    SP.VideoPlayerDecodeMode.AUTO -> "自动（硬解优先）"
+                    SP.VideoPlayerDecodeMode.HARDWARE_ONLY -> "仅硬解"
+                    SP.VideoPlayerDecodeMode.SOFTWARE_ONLY -> "仅软解"
+                },
+                onSelected = {
+                    settingsViewModel.videoPlayerDecodeMode =
+                        SP.VideoPlayerDecodeMode.entries.let {
+                            it[(it.indexOf(settingsViewModel.videoPlayerDecodeMode) + 1) % it.size]
+                        }
+                },
+            )
+        }
+
+        item {
+            LeanbackSettingsCategoryListItem(
                 headlineContent = "全局画面比例",
                 trailingContent = when (settingsViewModel.videoPlayerAspectRatio) {
                     SP.VideoPlayerAspectRatio.ORIGINAL -> "原始"

@@ -3,8 +3,9 @@ package com.vesaa.mytv.ui.screens.leanback.video.player
 import android.content.Context
 import android.net.Uri
 import android.net.wifi.WifiManager
-import android.os.Build
+import android.os.Handler
 import android.os.SystemClock
+import android.util.Log
 import android.view.SurfaceView
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -28,8 +29,10 @@ import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
-import androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+import androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.ExoPlaybackException
+import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory
@@ -38,7 +41,12 @@ import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.exoplayer.smoothstreaming.SsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.util.EventLogger
+import androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
+import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer.DecoderInitializationException
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
+import androidx.media3.exoplayer.video.VideoRendererEventListener
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -84,15 +92,47 @@ class LeanbackMedia3VideoPlayer(
         .setBackBuffer(0, false)
         .build()
 
-    private var forcePreferExtensionDecoders = false
-    private var hevcSoftFallbackTried = false
+    private var decoderPolicy = VideoDecoderPolicy(SP.videoPlayerDecodeMode)
+    private var decoderRecoveryJob: Job? = null
     private var lastPreparedUri: Uri? = null
     private var lastPreparedContentType: Int? = null
 
+    private fun selectVideoDecoders(
+        policy: VideoDecoderPolicy,
+        candidates: List<MediaCodecInfo>,
+    ): List<MediaCodecInfo> {
+        val byName = candidates.associateBy { it.name }
+        return policy.orderedCandidates(candidates.map {
+            VideoDecoderPolicy.Candidate(it.name, it.softwareOnly, it.hardwareAccelerated)
+        }).mapNotNull { byName[it.name] }
+    }
+
     private fun newRenderersFactory(): DefaultRenderersFactory {
-        val mode = if (forcePreferExtensionDecoders) EXTENSION_RENDERER_MODE_PREFER else EXTENSION_RENDERER_MODE_ON
-        return DefaultRenderersFactory(context)
-            .setExtensionRendererMode(mode)
+        val policy = decoderPolicy
+        val selector = MediaCodecSelector { mime, secure, tunneling ->
+            val candidates = MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneling)
+            if (MimeTypes.isVideo(mime)) selectVideoDecoders(policy, candidates) else candidates
+        }
+        // Keep FFmpeg audio support. Video is decoded by actual system MediaCodec components,
+        // so a "hardware only" choice cannot silently activate an extension software renderer.
+        return object : DefaultRenderersFactory(context) {
+            override fun buildVideoRenderers(
+                context: Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                eventHandler: Handler,
+                eventListener: VideoRendererEventListener,
+                allowedVideoJoiningTimeMs: Long,
+                out: ArrayList<Renderer>,
+            ) {
+                super.buildVideoRenderers(
+                    context, EXTENSION_RENDERER_MODE_OFF, mediaCodecSelector,
+                    enableDecoderFallback, eventHandler, eventListener, allowedVideoJoiningTimeMs, out,
+                )
+            }
+        }.setExtensionRendererMode(EXTENSION_RENDERER_MODE_ON)
+            .setMediaCodecSelector(selector)
             .setEnableDecoderFallback(true)
     }
 
@@ -170,6 +210,10 @@ class LeanbackMedia3VideoPlayer(
     // ── 播放器实例切换（HTTP ⇆ UDP） ──────────────────────────────
 
     private fun recreatePlayer(needUdp: Boolean) {
+        val previousVolume = videoPlayer.volume
+        val previousPlayWhenReady = videoPlayer.playWhenReady
+        val previousPlaybackParameters = videoPlayer.playbackParameters
+        stopNoVideoFrameWatchdog()
         videoPlayer.removeListener(playerListener)
         videoPlayer.removeAnalyticsListener(metadataListener)
         videoPlayer.removeAnalyticsListener(eventLogger)
@@ -178,7 +222,11 @@ class LeanbackMedia3VideoPlayer(
 
         videoPlayer = ExoPlayer.Builder(context, newRenderersFactory())
             .setLoadControl(if (needUdp) udpLoadControl else loadControl)
-            .build().apply { playWhenReady = true }
+            .build().apply {
+                volume = previousVolume
+                playWhenReady = previousPlayWhenReady
+                playbackParameters = previousPlaybackParameters
+            }
         videoPlayer.addListener(playerListener)
         videoPlayer.addAnalyticsListener(metadataListener)
         videoPlayer.addAnalyticsListener(eventLogger)
@@ -253,6 +301,12 @@ class LeanbackMedia3VideoPlayer(
         val isRtmp = uri.scheme.equals("rtmp", ignoreCase = true)
         val isUdpRtp = isUdpOrRtp(uri)
         val isRtsp = uri.scheme.equals("rtsp", ignoreCase = true)
+        // A different HLS rendition can contain progressive AVC and work on the hardware
+        // that rejected the previous rendition. Keep the rejection list for same-URI retries.
+        if (lastPreparedUri != null && lastPreparedUri != uri && decoderPolicy.hasFailures) {
+            decoderPolicy = VideoDecoderPolicy(decoderPolicy.mode)
+            recreatePlayer(isUdpRtp)
+        }
         lastPreparedUri = uri
         lastPreparedContentType = contentType
         if ((contentType ?: Util.inferContentType(uri)) == C.CONTENT_TYPE_HLS) {
@@ -595,10 +649,15 @@ class LeanbackMedia3VideoPlayer(
         }
 
         override fun onPlayerError(ex: Media3PlaybackException) {
+            // Decoder runtime errors (including Xring rejecting MBAFF after STARTED) need a new
+            // renderer. Initialization-only fallback does not cover them. Recover before any
+            // RTSP transport/HLS container retries: these errors are unrelated to the network.
+            val decoderFailure = isVideoDecoderFailure(ex)
+            if (decoderFailure && tryRecoverVideoDecoder(ex)) return
             // 运营商 RTSP 常见"UDP 不通、TCP 可播"场景：
             // 先按 TCP 拉流；若失败且还未尝试 UDP，则自动回退 UDP 再试一次。
             val curUri = videoPlayer.currentMediaItem?.localConfiguration?.uri
-            if (curUri?.scheme.equals("rtsp", ignoreCase = true) &&
+            if (!decoderFailure && curUri?.scheme.equals("rtsp", ignoreCase = true) &&
                 lastRtspForceTcp &&
                 rtspTcpPrepareRetriesRemaining > 0
             ) {
@@ -618,7 +677,7 @@ class LeanbackMedia3VideoPlayer(
                 }
                 return
             }
-            if (curUri?.scheme.equals("rtsp", ignoreCase = true) && lastRtspForceTcp && !rtspTriedUdpFallback) {
+            if (!decoderFailure && curUri?.scheme.equals("rtsp", ignoreCase = true) && lastRtspForceTcp && !rtspTriedUdpFallback) {
                 PlaybackTrace.i(
                     curUri,
                     "rtsp_fallback_udp",
@@ -648,11 +707,14 @@ class LeanbackMedia3VideoPlayer(
             val hlsUri = curUri
             if (hlsUri != null && Util.inferContentType(hlsUri) == C.CONTENT_TYPE_HLS && !hlsAvcFallbackTried) {
                 hlsAvcFallbackTried = true
+                val errorSessionId = prepareSessionId
+                val errorPlayer = videoPlayer
                 coroutineScope.launch {
                     val probe = runCatching {
                         val txt = fetchText(hlsUri.toString(), activeStreamRequestHeaders)
                         txt to probeHlsMaster(hlsUri.toString(), txt)
                     }.getOrNull()
+                    if (errorSessionId != prepareSessionId || errorPlayer !== videoPlayer) return@launch
                     if (probe != null) {
                         val (masterText, hlsProbe) = probe
                         if (hlsProbe.avcVariantUrl != null) {
@@ -779,9 +841,6 @@ class LeanbackMedia3VideoPlayer(
                     lastRenderedFpsElapsedMs <= 0L || sinceLastFrameMs > noFrameThresholdMs
                 if (!videoPlayer.isPlaying || !noVideoFrameForLongTime) continue
                 if (metadata.imageSequenceModeHint) continue
-                if (tryHevcSoftDecodeFallback()) {
-                    continue
-                }
                 if (isRtspSession) {
                     PlaybackTrace.i(
                         lastPreparedUri,
@@ -801,21 +860,86 @@ class LeanbackMedia3VideoPlayer(
         }
     }
 
-    private fun tryHevcSoftDecodeFallback(): Boolean {
-        if (hevcSoftFallbackTried || forcePreferExtensionDecoders) return false
-        val mime = metadata.videoMimeType.lowercase()
-        val codecs = metadata.videoCodecs.lowercase()
-        val decoder = metadata.videoDecoder.lowercase()
-        val isHevc = mime.contains("hevc") || codecs.contains("hev1") || codecs.contains("hvc1")
-        val alreadyFfmpeg = decoder.contains("ffmpeg")
-        if (!isHevc || alreadyFfmpeg) return false
-        val uri = lastPreparedUri ?: return false
+    private fun isVideoDecoderFailure(ex: Media3PlaybackException): Boolean {
+        val rendererError = ex as? ExoPlaybackException ?: return false
+        return rendererError.type == ExoPlaybackException.TYPE_RENDERER &&
+            MimeTypes.isVideo(rendererError.rendererFormat?.sampleMimeType) && ex.errorCode in setOf(
+                Media3PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                Media3PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+                Media3PlaybackException.ERROR_CODE_DECODING_FAILED,
+                Media3PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+                Media3PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+            )
+    }
 
-        hevcSoftFallbackTried = true
-        forcePreferExtensionDecoders = true
-        val needUdp = isUdpOrRtp(uri)
-        recreatePlayer(needUdp)
-        prepare(uri, lastPreparedContentType, activeStreamRequestHeaders)
+    private fun tryRecoverVideoDecoder(ex: Media3PlaybackException): Boolean {
+        val uri = lastPreparedUri ?: return false
+        val rendererError = ex as? ExoPlaybackException ?: return false
+        val format = rendererError.rendererFormat ?: videoPlayer.videoFormat ?: return false
+        val mime = format.sampleMimeType ?: return false
+        var failedCodec: MediaCodecInfo? = null
+        val failedNames = mutableSetOf<String>()
+        var cause: Throwable? = ex
+        while (cause != null) {
+            when (val error = cause) {
+                is MediaCodecDecoderException -> {
+                    failedCodec = error.codecInfo
+                    error.codecInfo?.name?.let { failedNames.add(it) }
+                }
+                is DecoderInitializationException -> {
+                    var initialization: DecoderInitializationException? = error
+                    while (initialization != null) {
+                        initialization.codecInfo?.let {
+                            failedCodec = it
+                            failedNames.add(it.name)
+                        }
+                        initialization = initialization.fallbackDecoderInitializationException
+                    }
+                }
+            }
+            cause = cause.cause
+        }
+        if (failedNames.isEmpty() && metadata.videoDecoder.isNotBlank()) {
+            failedNames.add(metadata.videoDecoder)
+        }
+        if (!decoderPolicy.reject(failedNames)) return false
+        val codec = failedCodec
+        // Do not weaken secure/tunneling requirements just to obtain a software decoder.
+        val secure = codec?.secure ?: (format.drmInitData != null)
+        // No player in this app enables tunneling. MediaCodecInfo.tunneling means that the
+        // component supports it, not that the failed playback requested it.
+        val tunneling = false
+        val remaining = runCatching {
+            selectVideoDecoders(
+                decoderPolicy,
+                MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneling),
+            )
+        }.getOrDefault(emptyList())
+        if (remaining.isEmpty()) {
+            Log.w(VideoDecoderInventory.TAG, "video_decoder_exhausted mode=${decoderPolicy.mode} failed=$failedNames")
+            return false
+        }
+        val contentType = lastPreparedContentType
+        val headers = activeStreamRequestHeaders
+        val sessionId = prepareSessionId
+        val positionMs = videoPlayer.currentPosition
+        val restorePosition = videoPlayer.isCurrentMediaItemSeekable && !videoPlayer.isCurrentMediaItemLive
+        val previousTrackSelection = videoPlayer.trackSelectionParameters
+        val previousPendingSubtitle = pendingApplyDefaultFirstSubtitle
+        Log.i(VideoDecoderInventory.TAG,
+            "video_decoder_retry mode=${decoderPolicy.mode} failed=$failedNames candidates=${remaining.map { it.name }}")
+        decoderRecoveryJob?.cancel()
+        decoderRecoveryJob = coroutineScope.launch {
+            // Leave the error callback before releasing the old player and its codec.
+            delay(100)
+            if (sessionId != prepareSessionId) return@launch
+            recreatePlayer(isUdpOrRtp(uri))
+            metadata = metadata.copy(videoDecoder = "", audioDecoder = "")
+            prepare(uri, contentType, headers)
+            videoPlayer.trackSelectionParameters = previousTrackSelection
+            pendingApplyDefaultFirstSubtitle = previousPendingSubtitle
+            if (restorePosition) videoPlayer.seekTo(positionMs)
+        }
         return true
     }
 
@@ -986,12 +1110,7 @@ class LeanbackMedia3VideoPlayer(
         ) {
             metadata = metadata.copy(videoDecoder = decoderName)
             triggerMetadata(metadata)
-            // x86_64 上高通 OMX 解码器不稳定，若是 HEVC 立即转 FFmpeg 软解
-            if (decoderName.contains("qcom", ignoreCase = true) &&
-                Build.SUPPORTED_ABIS.any { it.contains("x86") } &&
-                metadata.videoMimeType.contains("hevc", ignoreCase = true)) {
-                tryHevcSoftDecodeFallback()
-            }
+            Log.i(VideoDecoderInventory.TAG, "video_decoder_initialized mode=${decoderPolicy.mode} name=$decoderName")
         }
 
         override fun onAudioInputFormatChanged(
@@ -1064,6 +1183,7 @@ class LeanbackMedia3VideoPlayer(
 
     override fun initialize() {
         super.initialize()
+        VideoDecoderInventory.logAvcDecoders()
         videoPlayer.addListener(playerListener)
         videoPlayer.addAnalyticsListener(metadataListener)
         videoPlayer.addAnalyticsListener(eventLogger)
@@ -1071,6 +1191,8 @@ class LeanbackMedia3VideoPlayer(
     }
 
     override fun release() {
+        decoderRecoveryJob?.cancel()
+        prepareSessionId += 1
         hlsPreprobeJob?.cancel()
         smilResolveJob?.cancel()
         parseRetryJob?.cancel()
@@ -1094,9 +1216,15 @@ class LeanbackMedia3VideoPlayer(
         smilResolveJob?.cancel()
         parseRetryJob?.cancel()
         parseRetryJob = null
+        decoderRecoveryJob?.cancel()
+        decoderRecoveryJob = null
         stopImageSequenceMode()
-        forcePreferExtensionDecoders = false
-        hevcSoftFallbackTried = false
+        val requestedMode = SP.videoPlayerDecodeMode
+        if (decoderPolicy.mode != requestedMode || decoderPolicy.hasFailures) {
+            decoderPolicy = VideoDecoderPolicy(requestedMode)
+            recreatePlayer(isUdpOrRtp(Uri.parse(url)))
+        }
+        metadata = Metadata()
         lastPreparedUri = null
         lastPreparedContentType = null
         parseErrorRetryUsed = false
@@ -1192,14 +1320,15 @@ class LeanbackMedia3VideoPlayer(
     }
 
     override fun onDeactivate() {
+        decoderRecoveryJob?.cancel()
+        decoderRecoveryJob = null
+        prepareSessionId += 1
         hlsPreprobeJob?.cancel()
         smilResolveJob?.cancel()
         parseRetryJob?.cancel()
         parseRetryJob = null
         stopNoVideoFrameWatchdog()
         stopImageSequenceMode()
-        forcePreferExtensionDecoders = false
-        hevcSoftFallbackTried = false
         lastPlaybackLabel = null
         lastPreparedUri = null
         lastPreparedContentType = null

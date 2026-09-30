@@ -19,7 +19,7 @@ tvFoundation = "1.0.0-alpha10"
 tvMaterial = "1.0.0-beta01"
 coil = "2.7.0"
 workManager = "2.9.1"
-jellyfinMedia3Ffmpeg = "1.8.1-beta10"
+jellyfinMedia3Ffmpeg = "1.8.0+1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -62,4 +62,3 @@ android-application = { id = "com.android.application", version.ref = "agp" }
 jetbrains-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
-

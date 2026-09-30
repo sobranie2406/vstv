@@ -192,6 +192,9 @@ object SP {
         UPDATE_LAST_DOWNLOADED_APK_URL,
 
         /** ==================== 播放器 ==================== */
+        /** 视频解码方式 */
+        VIDEO_PLAYER_DECODE_MODE,
+
         /** 播放器 加载超时 */
         VIDEO_PLAYER_LOAD_TIMEOUT,
 
@@ -670,6 +673,13 @@ object SP {
         set(value) = sp.edit().putString(KEY.UPDATE_LAST_DOWNLOADED_APK_URL.name, value).apply()
 
     /** ==================== 播放器 ==================== */
+    /** 下次换台或重新打开播放时使用的解码方式 */
+    var videoPlayerDecodeMode: VideoPlayerDecodeMode
+        get() = VideoPlayerDecodeMode.fromValue(
+            sp.getInt(KEY.VIDEO_PLAYER_DECODE_MODE.name, VideoPlayerDecodeMode.AUTO.value),
+        )
+        set(value) = sp.edit().putInt(KEY.VIDEO_PLAYER_DECODE_MODE.name, value.value).apply()
+
     /** 播放器 加载超时 */
     var videoPlayerLoadTimeout: Long
         get() = sp.getLong(KEY.VIDEO_PLAYER_LOAD_TIMEOUT.name, Constants.VIDEO_PLAYER_LOAD_TIMEOUT)
@@ -752,6 +762,23 @@ object SP {
         companion object {
             fun fromValue(value: Int): AppDeviceDisplayType {
                 return entries.firstOrNull { it.value == value } ?: LEANBACK
+            }
+        }
+    }
+
+    enum class VideoPlayerDecodeMode(val value: Int) {
+        /** 硬解优先，解码失败后尝试兼容解码器 */
+        AUTO(0),
+
+        /** 只使用设备硬件解码器 */
+        HARDWARE_ONLY(1),
+
+        /** 只使用软件解码器 */
+        SOFTWARE_ONLY(2);
+
+        companion object {
+            fun fromValue(value: Int): VideoPlayerDecodeMode {
+                return entries.firstOrNull { it.value == value } ?: AUTO
             }
         }
     }
