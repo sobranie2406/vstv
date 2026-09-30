@@ -27,7 +27,7 @@ fun semverToVersionCode(versionName: String): Int {
         parts[2].coerceIn(0, 999)
 }
 
-val defaultVersionName = "2.1.26"
+val defaultVersionName = "2.1.27"
 val resolvedVersionName = releaseVersion.ifEmpty { defaultVersionName }
 val resolvedVersionCode =
     (project.findProperty("versionCode") as String?)?.toIntOrNull()
@@ -71,8 +71,7 @@ android {
         create("xiaomiPad") {
             dimension = "dist"
             applicationId = "com.vesaa.mytv.xiaomipad"
-            versionNameSuffix = "-xiaomi-pad"
-            resValue("string", "app_name", "VsTV 平板适配")
+            resValue("string", "app_name", "VSTV")
         }
         create("arm") {
             dimension = "abiPack"
@@ -230,4 +229,3 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 }
-

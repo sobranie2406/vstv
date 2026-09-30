@@ -1,4 +1,4 @@
-name: Release
+name: VSTV Release
 
 on:
   push:
@@ -30,6 +30,12 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;34.0.0'
+          log-accepted-android-sdk-licenses: false
 
       - name: Prepare keystore (required for releasable auto-update)
         id: sign
@@ -65,8 +71,7 @@ jobs:
           echo "versionCode=$VC" >> "$GITHUB_OUTPUT"
           echo "Release version=$VER versionCore=$VER_NUM versionCode=$VC (from tag $TAG)"
 
-      # 单次 ./gradlew assembleRelease，无重试；若编译失败，日志里可能出现多条失败（各 flavor 并行任务独立报错）
-      - name: Assemble all release variants
+      - name: Assemble VSTV release
         env:
           KEYSTORE: ${{ github.workspace }}/app/keystore.jks
           KEYSTORE_TYPE: PKCS12
@@ -80,7 +85,7 @@ jobs:
           VER="${{ steps.ver.outputs.version }}"
           VC="${{ steps.ver.outputs.versionCode }}"
           ARGS=(
-            assembleRelease
+            :app:assembleXiaomiPadArmRelease
             --no-daemon
             --build-cache
             "-PreleaseVersion=$VER"
@@ -130,9 +135,7 @@ jobs:
             ls -lh "$dest"
           }
 
-          copy_flavor "originalArm" "$ROOT/artifacts/vstv-${VER}-arm.apk"
-          copy_flavor "originalX86" "$ROOT/artifacts/vstv-${VER}-x86_64.apk"
-          copy_flavor "disguisedArm" "$ROOT/artifacts/vstv-${VER}-HarmonyOS.apk"
+          copy_flavor "xiaomiPadArm" "$ROOT/artifacts/VSTV-${VER}-arm.apk"
 
           echo "=== 即将上传的 artifacts ==="
           ls -lh "$ROOT/artifacts/"
@@ -159,9 +162,7 @@ jobs:
             echo "${tag} FFmpeg so 校验通过"
           }
 
-          require_ffmpeg_so "$ROOT/artifacts/vstv-${VER}-arm.apk" "arm"
-          require_ffmpeg_so "$ROOT/artifacts/vstv-${VER}-x86_64.apk" "x86_64"
-          require_ffmpeg_so "$ROOT/artifacts/vstv-${VER}-HarmonyOS.apk" "HarmonyOS"
+          require_ffmpeg_so "$ROOT/artifacts/VSTV-${VER}-arm.apk" "arm"
 
       # 优先使用 CHANGELOG.md 中对应「## [x.y.z]」章节作为 Release 正文；
       # 若缺失则写入兜底文案（不阻断构建）。
@@ -183,7 +184,7 @@ jobs:
           if m:
               body = m.group(0).rstrip() + "\n"
           else:
-              body = f"## [{core}]\\n\\n- 发布版本：{ver}\\n- 本次未在 CHANGELOG.md 中找到对应章节，已使用自动兜底说明。\\n"
+              body = f"## [{core}]\n\n- 发布版本：{ver}\n- 本次未在 CHANGELOG.md 中找到对应章节，已使用自动兜底说明。\n"
           pathlib.Path("release_body.md").write_text(body, encoding="utf-8")
           print("---- release_body.md（预览，截断）----")
           print(body[:4000] if len(body) > 4000 else body)
@@ -193,11 +194,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          # 顺序影响上传/部分 API 中资产排列；与 Package artifacts 中 copy 顺序一致，优先 arm
+          name: VSTV ${{ steps.ver.outputs.version }}
           files: |
-            artifacts/vstv-${{ steps.ver.outputs.version }}-arm.apk
-            artifacts/vstv-${{ steps.ver.outputs.version }}-x86_64.apk
-            artifacts/vstv-${{ steps.ver.outputs.version }}-HarmonyOS.apk
+            artifacts/VSTV-${{ steps.ver.outputs.version }}-arm.apk
           body_path: release_body.md
           generate_release_notes: false
         env:

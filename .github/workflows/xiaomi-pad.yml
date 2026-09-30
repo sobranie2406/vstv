@@ -1,4 +1,4 @@
-name: Xiaomi Pad adaptation
+name: VSTV Build
 
 on:
   push:
@@ -24,11 +24,11 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-35 build-tools;34.0.0'
           log-accepted-android-sdk-licenses: false
-      - name: Test and build independent adaptation APK
+      - name: Test and build VSTV APK
         run: bash ./gradlew :app:testXiaomiPadArmDebugUnitTest :app:assembleXiaomiPadArmDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: vstv-xiaomi-pad-debug
+          name: VSTV-debug
           path: app/build/outputs/apk/xiaomiPadArm/debug/*.apk
       - uses: actions/upload-artifact@v4
         if: always()
